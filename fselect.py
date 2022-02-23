@@ -8,7 +8,7 @@ from sklearn.metrics.pairwise import pairwise_distances
 from tqdm import tqdm
 from functools import partial
 
-def udfs(X, gamma=1e6, lamb=1e-8, eps=1e-4, k=5, n_cluster=5,verbose=True):
+def udfs(X, gamma=1e6, lamb=1e-6, eps=1e-4, k=5, n_cluster=5, verbose=True, maxiter=1000,mdir=None):
     """
     min_W Tr(W^T M W) + gamma ||W||_{2,1}, s.t. W^T W = I
     Input
@@ -31,13 +31,14 @@ def udfs(X, gamma=1e6, lamb=1e-8, eps=1e-4, k=5, n_cluster=5,verbose=True):
     Yang, Yi et al. "l2,1-Norm Regularized Discriminative Feature Selection for Unsupervised Learning." AAAI 2012.
     Li, Zechao et al., "Unsupervised Feature Selection Using Nonnegative Spectral Analysis." AAAI 2012.
     """
+
     @partial(jit, static_argnums=(3,))
     def calculate_obj(X, W, M, gamma):
         return jnp.trace(jnp.dot(jnp.dot(W.T, M), W)) + gamma*(jnp.sqrt(jnp.multiply(W, W).sum(1))).sum()
 
     @jit
-    def generate_diagonal_matrix(U):
-        """This function generates a diagonal matrix D from an input matrix U as D_ii = 0.5 / ||U[i,:]|| """
+    def generate_D(U):
+        """Generate a diagonal matrix D from U: D_ii = 0.5 / ||U[i,:]|| """
         Dii = jnp.clip(jnp.sqrt(jnp.multiply(U, U).sum(1)), a_min=lamb)
         D = jnp.diag(jnp.reciprocal(2*Dii))
         return D
@@ -47,32 +48,39 @@ def udfs(X, gamma=1e6, lamb=1e-8, eps=1e-4, k=5, n_cluster=5,verbose=True):
 
     # construct M
     n_sample, n_feature = X.shape
-    M = construct_M(X, k, gamma, lamb)
+    if mdir is not None:
+        M = np.loadtxt(mdir)
+    else:
+        M = construct_M(X, k, gamma, lamb)
 
     D = jnp.eye(n_feature)
     max_iter = 1000
     obj = []
-    for iter_step in tqdm(range(max_iter), desc='updating W'):
+    solution_path = []
+    for iter_step in tqdm(range(maxiter), desc='updating W'):
         # update W as the eigenvectors of P corresponding to the first n clusters
         # smallest eigenvalues
         P = M + gamma*D
-        eigen_value, eigen_vector = scipy.linalg.eigh(a=P)
-        eigen_value = eigen_value[0:n_cluster]
-        W = eigen_vector[:, 0:n_cluster]
+        eigenvalues, eigenvectors = scipy.linalg.eigh(a=P)
+        eigenvalues = eigenvalues[0:n_cluster]
+        W = eigenvectors[:, 0:n_cluster]
 
         # update D as D_ii = 1 / (2 * ||W(i,:)||)
-        D = generate_diagonal_matrix(W)
+        D = generate_D(W)
         obj.append(calculate_obj(X, W, M, gamma).item())
+        solution_path.append(W)
 
         if verbose:
-            tqdm.write('iter: {0} obj: {1} max ev: {2} min ev: {3}'.format(iter_step+1, obj[iter_step], eigen_value.max(), eigen_value.min()))
+            tqdm.write('iter: {0} obj: {1} max ev: {2} min ev: {3}'.format(iter_step+1, 
+                obj[iter_step], eigenvalues.max(), eigenvalues.min()))
 
         if iter_step >= 1 and jnp.abs(obj[iter_step] - obj[iter_step-1]) < 1e-4:
             break
+    W = solution_path[jnp.argmin(jnp.array(obj))]
     return W, M
 
 def construct_M(X, k, gamma, lamb):
-    """This function constructs the M matrix described in the paper """
+    """Construct M """
     n_sample, n_feature = X.shape
     Xt = X.T
     D = pairwise_distances(X, n_jobs=-2)
